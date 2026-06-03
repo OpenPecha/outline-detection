@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "outline-detection"
+version = "0.1.0"
+description = "Rule-based Tibetan text boundary (outline) detection"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["regex>=2024.0.0"]
+
+[project.optional-dependencies]
+crf = ["scikit-learn>=1.3.0", "sklearn-crfsuite>=0.4.0"]
+
+[project.scripts]
+outline-detect = "outline_detection.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
