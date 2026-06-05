@@ -146,13 +146,26 @@ def _cmd_crf(args):
                 max_iter=args.max_iter,
                 label_radius=args.label_radius,
                 tolerance=args.tolerance,
+                features_cache=args.features_cache,
+                eval_file=args.eval_file,
+                eval_report=args.eval_report,
+            )
+        elif args.crf_command == "evaluate":
+            model = args.model
+            eval_report = args.report
+            crf.run_evaluate(
+                args.input_file,
+                model,
+                tolerance=args.tolerance,
+                report=eval_report,
             )
         elif args.crf_command == "predict":
             crf.run_predict(args.input_file, args.model, args.output)
         elif args.crf_command == "inspect":
             crf.run_inspect(args.model_file, top=args.top)
         else:
-            print("Specify a crf subcommand: train, predict, or inspect", file=sys.stderr)
+            print("Specify a crf subcommand: train, evaluate, predict, or inspect",
+                  file=sys.stderr)
             return 1
     except ImportError as exc:
         print(str(exc), file=sys.stderr)
@@ -225,6 +238,19 @@ def build_parser():
     ct.add_argument("--max-iter", type=int, default=150)
     ct.add_argument("--label-radius", type=int, default=1)
     ct.add_argument("--tolerance", type=int, default=15)
+    ct.add_argument("--features-cache", metavar="PATH", default=None,
+                    help="Save/load prepared features (load if file exists)")
+    ct.add_argument("--eval-file", metavar="PATH", default=None,
+                    help="Annotated JSON to evaluate after training")
+    ct.add_argument("--eval-report", nargs="?", const="", default=None,
+                    help="Write eval markdown report (default: reports/crf_eval_<stem>.md)")
+
+    ce = crf_sub.add_parser("evaluate", help="Evaluate saved CRF model on annotated data")
+    ce.add_argument("input_file", help="Annotated eval JSON/JSONL/TXT")
+    ce.add_argument("--model", required=True, help="Path to boundary_crf.pkl")
+    ce.add_argument("--tolerance", type=int, default=15)
+    ce.add_argument("--report", nargs="?", const="", default=None,
+                    help="Write markdown report (default: reports/crf_eval_<stem>.md)")
 
     cp = crf_sub.add_parser("predict", help="Predict on raw text")
     cp.add_argument("input_file")
