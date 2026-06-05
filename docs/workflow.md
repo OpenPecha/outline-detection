@@ -71,20 +71,43 @@ outline-detect predict data/samples/INPUT.txt --profile balanced --output report
 
 This inserts `<b>` markers at predicted positions (use `detect` instead if you just want the index list).
 
-## 6. CRF baseline (optional, needs [crf] extra)
+## 6. CRF training and evaluation (optional, needs [crf] extra)
+
+Download corpora and models from Hugging Face first — see [huggingface.md](huggingface.md).
+
+**Full-corpus training** with disk feature cache (recommended for 82K snippets):
 
 ```bash
-outline-detect crf train data/breakpoints_context_snippets_unique.json --folds 5 --tolerance 15
-outline-detect crf train data/breakpoints_context_snippets_unique.json --save-model
+outline-detect crf train data/breakpoints_context_snippets.json \
+  --save-model reports/models/boundary_crf.pkl \
+  --features-cache reports/models/crf_features.pkl \
+  --eval-file data/breakpoints_context_snippets_unique.json \
+  --eval-report
+```
+
+The feature cache is reused on subsequent runs if the file exists. Post-train eval writes `reports/crf_eval_<stem>.md`.
+
+**Evaluate a saved model** (full or unbiased):
+
+```bash
+outline-detect crf evaluate data/breakpoints_context_snippets_unique.json \
+  --model reports/models/boundary_crf.pkl --tolerance 15
+```
+
+**Predict on raw text:**
+
+```bash
 outline-detect crf predict data/samples/INPUT.txt --model reports/models/boundary_crf.pkl
 ```
+
+For unbiased benchmark numbers, download the unbiased model from Hub and evaluate with that `.pkl`. See [evaluation.md](evaluation.md).
 
 ## Data files
 
 | File | Snippets | Notes |
 |------|----------|-------|
-| `data/breakpoints_context_snippets.json` | 82,560 | Full annotated corpus |
-| `data/breakpoints_context_snippets_unique.json` | 31,591 | Deduplicated; faster iteration |
+| `data/breakpoints_context_snippets.json` | 82,560 | Download from Hub; full training corpus |
+| `data/breakpoints_context_snippets_unique.json` | 31,591 | Download from Hub; benchmark |
 | `data/samples/` | — | Optional raw text for `detect` / `predict` |
 
 ## Input formats

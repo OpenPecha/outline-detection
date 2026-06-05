@@ -68,8 +68,15 @@ outline-detect predict data/samples/INPUT.txt --profile balanced
 **CRF** (requires the `[crf]` extra):
 
 ```bash
-outline-detect crf train data/breakpoints_context_snippets_unique.json --folds 5 --tolerance 15
-outline-detect crf train data/breakpoints_context_snippets_unique.json --save-model
+# Full-corpus train with feature cache and post-train eval
+outline-detect crf train data/breakpoints_context_snippets.json \
+  --save-model --features-cache reports/models/crf_features.pkl \
+  --eval-file data/breakpoints_context_snippets_unique.json
+
+# Evaluate a saved model
+outline-detect crf evaluate data/breakpoints_context_snippets_unique.json \
+  --model reports/models/boundary_crf.pkl --tolerance 15
+
 outline-detect crf predict data/samples/INPUT.txt --model reports/models/boundary_crf.pkl
 ```
 
@@ -82,6 +89,20 @@ outline-detect crf predict data/samples/INPUT.txt --model reports/models/boundar
 | `data/samples/` | Optional raw `.txt` files for prediction demos |
 
 Boundaries in annotated JSON are marked with `</b>` (or `<b>`).
+
+**Hugging Face Hub:**
+
+| Resource | Repo |
+|----------|------|
+| Full snippets (82,560) | [ganga4364/tibetan-outline-boundary-snippets-full](https://huggingface.co/datasets/ganga4364/tibetan-outline-boundary-snippets-full) |
+| Unique benchmark (31,591) | [ganga4364/tibetan-outline-boundary-snippets-unique](https://huggingface.co/datasets/ganga4364/tibetan-outline-boundary-snippets-unique) |
+| CRF full (production) | [ganga4364/tibetan-outline-boundary-crf-full](https://huggingface.co/ganga4364/tibetan-outline-boundary-crf-full) |
+| CRF unbiased (honest eval) | [ganga4364/tibetan-outline-boundary-crf-unbiased](https://huggingface.co/ganga4364/tibetan-outline-boundary-crf-unbiased) |
+
+```bash
+hf download ganga4364/tibetan-outline-boundary-snippets-unique --repo-type dataset
+hf download ganga4364/tibetan-outline-boundary-crf-unbiased boundary_crf.pkl --local-dir ./reports/models
+```
 
 ## Outputs
 
@@ -97,14 +118,23 @@ Boundaries in annotated JSON are marked with `</b>` (or `<b>`).
 
 ## Results (unique corpus, ±15 chars)
 
-After disabling net-negative rules (D, C, E), **balanced** reaches about **60% F1** (~63% precision, ~57.5% recall). Primary active rules: **A** (yig mgo) and **G** (༈). Regenerate with the `evaluate` command; the latest report lands in `reports/evaluations/rule_based_evaluation_unique.md`.
+| Method | F1 |
+|--------|-----|
+| Rule-based (balanced) | **0.601** |
+| CRF full | 0.571 |
+| CRF unbiased | 0.555 |
+
+Rule-based **balanced** reaches ~63% precision and ~57.5% recall. Primary active rules: **A** (yig mgo) and **G** (༈). See [docs/evaluation.md](docs/evaluation.md) for full comparison and regeneration commands.
 
 ## Documentation
 
 - [docs/terminology.md](docs/terminology.md) — Tibetan signals, markup, metrics
 - [docs/rules.md](docs/rules.md) — Rules A–H and profile presets
 - [docs/workflow.md](docs/workflow.md) — Full step-by-step workflow
+- [docs/huggingface.md](docs/huggingface.md) — Hub datasets and models
+- [docs/evaluation.md](docs/evaluation.md) — Benchmark results
 - [docs/README.md](docs/README.md) — Doc index
+- [CHANGELOG.md](CHANGELOG.md) — Release notes
 
 ## Repository layout
 
@@ -115,5 +145,6 @@ After disabling net-negative rules (D, C, E), **balanced** reaches about **60% F
 │   └── outline_detection/   # api, cli, detector, evaluation, analyzer, crf, utils, paths
 ├── data/                    # Annotated JSON corpora and samples/
 ├── docs/                    # Static reference
+├── scripts/                 # Training, comparison, and Hub upload helpers
 └── reports/                 # Generated outputs (gitignored)
 ```
