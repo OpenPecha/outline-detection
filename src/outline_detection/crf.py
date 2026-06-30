@@ -16,6 +16,7 @@ import json
 import pickle
 import re
 import warnings
+from datetime import datetime, timezone
 from pathlib import Path
 from collections import Counter
 
@@ -34,6 +35,9 @@ _CRF_EXTRA_MSG = (
     'CRF features require extra dependencies. '
     'Install with: pip install "outline-detection[crf]"'
 )
+
+# Bump when feature extraction or labeling logic changes (invalidates caches).
+FEATURE_CACHE_VERSION = 1
 
 
 def _import_crf():
@@ -260,6 +264,93 @@ def prepare_training_data(annotated_strings, boundary_label_radius=1):
 
 
 # ===========================================================================
+# Prepared feature cache
+# ===========================================================================
+
+def _print_training_stats(X, y):
+    print(f"  Training sequences: {len(X)}")
+    print(f"  Total tokens: {sum(len(seq) for seq in X)}")
+    b_count = sum(labels.count("B") for labels in y)
+    o_count = sum(labels.count("O") for labels in y)
+    print(f"  B (boundary) tokens: {b_count}")
+    print(f"  O (other) tokens:    {o_count}")
+    print(f"  B/O ratio:           1:{o_count // max(b_count, 1)}")
+    print()
+
+
+def save_prepared_features(path, X, y, metadata):
+    """Persist prepared CRF sequences (X, y) and metadata to disk."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": FEATURE_CACHE_VERSION,
+        "X": X,
+        "y": y,
+        "metadata": metadata,
+    }
+    print(f"Saving prepared features to {path} ...")
+    with open(path, "wb") as f:
+        pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+    size_gb = path.stat().st_size / (1024 ** 3)
+    print(f"  Saved ({size_gb:.2f} GB)")
+
+
+def load_prepared_features(path, boundary_label_radius):
+    """Load prepared features; validate version and label radius."""
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(path)
+    print(f"Loading prepared features from {path} ...")
+    with open(path, "rb") as f:
+        payload = pickle.load(f)
+    version = payload.get("version")
+    if version != FEATURE_CACHE_VERSION:
+        raise ValueError(
+            f"Feature cache version mismatch: file has {version}, "
+            f"expected {FEATURE_CACHE_VERSION}. Delete the cache and rebuild."
+        )
+    meta = payload.get("metadata") or {}
+    cached_radius = meta.get("boundary_label_radius")
+    if cached_radius is not None and cached_radius != boundary_label_radius:
+        raise ValueError(
+            f"Feature cache label_radius={cached_radius} does not match "
+            f"requested {boundary_label_radius}. Delete the cache and rebuild."
+        )
+    X = payload["X"]
+    y = payload["y"]
+    print(f"  Loaded {len(X)} sequences, {sum(len(s) for s in X)} tokens")
+    if meta:
+        print(f"  Cache metadata: source={meta.get('source_file')}, "
+              f"created={meta.get('created_at')}")
+    return X, y
+
+
+def resolve_prepared_features(annotated_strings, boundary_label_radius, features_cache,
+                              source_file=None):
+    """
+    Return (X, y), loading from cache if the file exists else preparing and saving.
+    """
+    cache_path = Path(features_cache) if features_cache else None
+    if cache_path and cache_path.exists():
+        return load_prepared_features(cache_path, boundary_label_radius)
+
+    print(f"Preparing training data from {len(annotated_strings)} strings...")
+    X, y = prepare_training_data(annotated_strings, boundary_label_radius)
+    _print_training_stats(X, y)
+
+    if cache_path:
+        metadata = {
+            "source_file": str(source_file) if source_file else None,
+            "boundary_label_radius": boundary_label_radius,
+            "n_sequences": len(X),
+            "n_tokens": sum(len(seq) for seq in X),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        save_prepared_features(cache_path, X, y, metadata)
+    return X, y
+
+
+# ===========================================================================
 # CRF Detector class
 # ===========================================================================
 
@@ -282,19 +373,23 @@ class CRFBoundaryDetector:
         self.boundary_label_radius = boundary_label_radius
         self.crf = None
 
-    def train(self, annotated_strings):
-        """Train the CRF on annotated strings."""
-        print(f"Preparing training data from {len(annotated_strings)} strings...")
-        X, y = prepare_training_data(annotated_strings, self.boundary_label_radius)
-        print(f"  Training sequences: {len(X)}")
-        print(f"  Total tokens: {sum(len(seq) for seq in X)}")
+    def train(self, annotated_strings=None, features_cache=None, source_file=None,
+              X=None, y=None):
+        """
+        Train the CRF on annotated strings or pre-built (X, y).
 
-        b_count = sum(l.count("B") for l in y)
-        o_count = sum(l.count("O") for l in y)
-        print(f"  B (boundary) tokens: {b_count}")
-        print(f"  O (other) tokens:    {o_count}")
-        print(f"  B/O ratio:           1:{o_count // max(b_count, 1)}")
-        print()
+        If features_cache path exists, load X/y from disk and skip extraction.
+        Otherwise prepare from annotated_strings and optionally save to features_cache.
+        """
+        if X is None or y is None:
+            if annotated_strings is None:
+                raise ValueError("Provide annotated_strings or pre-built X, y")
+            X, y = resolve_prepared_features(
+                annotated_strings,
+                self.boundary_label_radius,
+                features_cache,
+                source_file=source_file,
+            )
 
         print("Training CRF model...")
         sklearn_crfsuite, _crf_metrics, _KFold = _import_crf()
@@ -523,8 +618,90 @@ def default_model_path():
     return models_dir() / "boundary_crf.pkl"
 
 
+def default_eval_report_path(eval_file):
+    stem = Path(eval_file).stem
+    return reports_dir() / f"crf_eval_{stem}.md"
+
+
+def run_crf_evaluation(detector, eval_strings, tolerance=15, eval_file=None,
+                       report_path=None):
+    """
+    Evaluate a trained CRF detector on annotated strings (position-level metrics).
+    """
+    print(f"\n{'='*60}")
+    print("CRF EVALUATION")
+    print(f"{'='*60}")
+    print(f"  Snippets: {len(eval_strings)}")
+    print(f"  Position tolerance: ±{tolerance} chars")
+    print()
+
+    all_tp = 0
+    all_fp = 0
+    all_fn = 0
+    evaluated = 0
+
+    for annotated in eval_strings:
+        clean, true_positions = strip_boundaries(annotated)
+        if not true_positions or not clean.strip():
+            continue
+        pred_positions = detector.predict_positions(clean)
+        result = evaluate(pred_positions, true_positions, tolerance=tolerance)
+        all_tp += result["true_positives"]
+        all_fp += result["false_positives_count"]
+        all_fn += result["false_negatives_count"]
+        evaluated += 1
+
+    precision = all_tp / (all_tp + all_fp) if (all_tp + all_fp) > 0 else 0
+    recall = all_tp / (all_tp + all_fn) if (all_tp + all_fn) > 0 else 0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+
+    print(f"  Evaluated snippets: {evaluated}")
+    print(f"  Precision: {precision:.4f}")
+    print(f"  Recall:    {recall:.4f}")
+    print(f"  F1:        {f1:.4f}")
+    print(f"  TP={all_tp}  FP={all_fp}  FN={all_fn}")
+    print()
+
+    metrics = {
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "true_positives": all_tp,
+        "false_positives": all_fp,
+        "false_negatives": all_fn,
+        "evaluated_snippets": evaluated,
+        "tolerance": tolerance,
+    }
+
+    if report_path is not None:
+        report_path = ensure_report_dir(report_path)
+        eval_label = eval_file or "eval set"
+        lines = [
+            "# CRF evaluation report",
+            "",
+            f"- **Eval file:** `{eval_label}`",
+            f"- **Snippets evaluated:** {evaluated}",
+            f"- **Tolerance:** ±{tolerance} chars",
+            "",
+            "| Metric | Value |",
+            "|--------|-------|",
+            f"| Precision | {precision:.4f} |",
+            f"| Recall | {recall:.4f} |",
+            f"| F1 | {f1:.4f} |",
+            f"| TP | {all_tp} |",
+            f"| FP | {all_fp} |",
+            f"| FN | {all_fn} |",
+            "",
+        ]
+        report_path.write_text("\n".join(lines), encoding="utf-8")
+        print(f"Evaluation report saved to: {report_path.resolve()}")
+
+    return metrics
+
+
 def run_train(input_file, folds=0, save_model=None, c1=0.1, c2=0.1,
-              max_iter=150, label_radius=1, tolerance=15):
+              max_iter=150, label_radius=1, tolerance=15,
+              features_cache=None, eval_file=None, eval_report=None):
     strings = load_annotated(input_file)
     print(f"Loaded {len(strings)} annotated strings.\n")
 
@@ -539,17 +716,62 @@ def run_train(input_file, folds=0, save_model=None, c1=0.1, c2=0.1,
             tolerance=tolerance,
         )
 
-    if save_model is not None:
-        print("\nTraining on FULL dataset for model export...")
+    train_full = save_model is not None or eval_file is not None
+    detector = None
+
+    if train_full:
+        print("\nTraining on FULL dataset...")
         detector = CRFBoundaryDetector(
             c1=c1,
             c2=c2,
             max_iterations=max_iter,
             boundary_label_radius=label_radius,
         )
-        detector.train(strings)
-        save_path = ensure_report_dir(save_model)
-        detector.save(str(save_path))
+        detector.train(
+            strings,
+            features_cache=features_cache,
+            source_file=input_file,
+        )
+        if save_model is not None:
+            save_path = ensure_report_dir(save_model)
+            detector.save(str(save_path))
+
+    if eval_file is not None:
+        if detector is None:
+            raise RuntimeError("--eval-file requires training or a loaded model")
+        eval_strings = load_annotated(eval_file)
+        print(f"\nLoaded {len(eval_strings)} eval strings from {eval_file}")
+        report = eval_report
+        if report == "":
+            report = default_eval_report_path(eval_file)
+        run_crf_evaluation(
+            detector,
+            eval_strings,
+            tolerance=tolerance,
+            eval_file=eval_file,
+            report_path=report,
+        )
+
+
+def run_evaluate(eval_file, model, tolerance=15, report=None):
+    """Load a saved model and evaluate on annotated eval snippets."""
+    eval_strings = load_annotated(eval_file)
+    print(f"Loaded {len(eval_strings)} eval strings from {eval_file}\n")
+
+    detector = CRFBoundaryDetector()
+    detector.load(model)
+
+    report_path = report
+    if report == "":
+        report_path = default_eval_report_path(eval_file)
+
+    return run_crf_evaluation(
+        detector,
+        eval_strings,
+        tolerance=tolerance,
+        eval_file=eval_file,
+        report_path=report_path,
+    )
 
 
 def run_predict(input_file, model, output=None):
