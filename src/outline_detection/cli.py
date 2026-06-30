@@ -10,12 +10,59 @@ Subcommands:
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
 from .api import detect_breakpoints
 from .detector import PROFILE_PRESETS, RuleBasedDetector
 from .paths import reports_dir
+
+
+def _add_layout_args(parser):
+    """Add the page-layout rule flags (Rules I–L) to a subcommand parser."""
+    parser.add_argument("--rule-i-empty-page", action="store_true",
+                        help="Rule I: an empty page marks a text break")
+    parser.add_argument("--rule-j-sparse-tail", action="store_true",
+                        help="Rule J: dense page followed by two sparse pages")
+    parser.add_argument("--rule-k-sparse-island", action="store_true",
+                        help="Rule K: sparse page between dense pages (ambiguous)")
+    parser.add_argument("--rule-l-modern", action="store_true",
+                        help="Rule L: modern-publication layout (reserved)")
+    parser.add_argument("--line-threshold", type=int, default=4,
+                        help="Line-count threshold T for Rules J/K (default 4)")
+    parser.add_argument("--page-delimiter", default="ff",
+                        help="Page delimiter: 'ff' (form feed, default), "
+                             "'blank' / 'blankN', or a regex")
+    parser.add_argument("--no-ignore-page-number-lines",
+                        dest="ignore_page_number_lines",
+                        action="store_false",
+                        help="Count lone folio/page-number lines as page lines")
+    parser.set_defaults(ignore_page_number_lines=True)
+
+
+def _resolve_page_delimiter(token):
+    """Map a --page-delimiter token to (delimiter, min_blank_lines)."""
+    if token in (None, "ff", "formfeed", "\\f", "\f"):
+        return "\f", 2
+    m = re.fullmatch(r"blank(\d*)", token)
+    if m:
+        return "blank", int(m.group(1)) if m.group(1) else 2
+    return token, 2
+
+
+def _layout_kwargs(args):
+    delimiter, min_blank_lines = _resolve_page_delimiter(args.page_delimiter)
+    return dict(
+        rule_i_empty_page=args.rule_i_empty_page,
+        rule_j_sparse_tail=args.rule_j_sparse_tail,
+        rule_k_sparse_island=args.rule_k_sparse_island,
+        rule_l_modern=args.rule_l_modern,
+        line_threshold=args.line_threshold,
+        page_delimiter=delimiter,
+        min_blank_lines=min_blank_lines,
+        ignore_page_number_lines=args.ignore_page_number_lines,
+    )
 
 
 def _read_input_text(source, inline_text):
@@ -34,6 +81,7 @@ def _cmd_detect(args):
         min_confidence=args.min_confidence,
         merge_window=args.merge_window,
         detailed=args.detailed,
+        **_layout_kwargs(args),
     )
     payload = json.dumps(result, ensure_ascii=False, indent=2 if args.pretty else None)
     if args.output:
@@ -104,7 +152,7 @@ def _cmd_evaluate(args):
 def _cmd_predict(args):
     from .evaluation import run_prediction
 
-    detector = RuleBasedDetector(profile=args.profile)
+    detector = RuleBasedDetector(profile=args.profile, **_layout_kwargs(args))
     if args.min_confidence is not None:
         detector.min_confidence = args.min_confidence
     if args.merge_window is not None:
@@ -192,6 +240,7 @@ def build_parser():
                    help="Include per-boundary confidence and firing rule")
     d.add_argument("--pretty", action="store_true", help="Pretty-print JSON")
     d.add_argument("--output", "-o", default=None, help="Write JSON to this file")
+    _add_layout_args(d)
     d.set_defaults(func=_cmd_detect)
 
     # evaluate
@@ -215,6 +264,7 @@ def build_parser():
     p.add_argument("--min-confidence", type=float, default=None)
     p.add_argument("--merge-window", type=int, default=None)
     p.add_argument("--output", "-o", default=None)
+    _add_layout_args(p)
     p.set_defaults(func=_cmd_predict)
 
     # analyze

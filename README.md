@@ -31,6 +31,24 @@ detect_breakpoints(text, min_confidence=0.5)            # override threshold
 detect_breakpoints(text, detailed=True)                 # adds per-boundary confidence + rule
 ```
 
+### OCR page mode (optional)
+
+For OCR output that arrives as a sequence of pages, the optional page-layout
+rules (I–L) use **line density** instead of orthographic signals. They are off
+by default and inert on continuous (single-page) text:
+
+```python
+detect_breakpoints(
+    ocr_text,
+    rule_i_empty_page=True,      # an empty page marks a break
+    rule_j_sparse_tail=True,     # dense page then two sparse pages
+    line_threshold=4,            # T: "few lines" cutoff
+    page_delimiter="\f",         # form feed (default), "blank"/"blankN", or regex
+)
+```
+
+See [docs/rules.md](docs/rules.md#page-layout-rules-il) for the full rule set.
+
 ## CLI
 
 The install provides an `outline-detect` command.
@@ -129,7 +147,7 @@ Rule-based **balanced** reaches ~63% precision and ~57.5% recall. Primary active
 ## Documentation
 
 - [docs/terminology.md](docs/terminology.md) — Tibetan signals, markup, metrics
-- [docs/rules.md](docs/rules.md) — Rules A–H and profile presets
+- [docs/rules.md](docs/rules.md) — Rules A–H (orthographic) and I–L (page layout)
 - [docs/workflow.md](docs/workflow.md) — Full step-by-step workflow
 - [docs/huggingface.md](docs/huggingface.md) — Hub datasets and models
 - [docs/evaluation.md](docs/evaluation.md) — Benchmark results

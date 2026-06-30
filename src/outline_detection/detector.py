@@ -19,6 +19,11 @@ from .utils import (
     YIG_MGO_CHARS,
     SBRUL_SHAD,
 )
+from .page_layout import (
+    FORM_FEED,
+    char_offset_at_page_start,
+    segment_pages,
+)
 
 PROFILE_PRESETS = {
     "recall": {
@@ -30,6 +35,10 @@ PROFILE_PRESETS = {
         "rule_e": False,
         "rule_g_unguarded": False,
         "rule_c_bare": False,
+        "rule_i_empty_page": False,
+        "rule_j_sparse_tail": False,
+        "rule_k_sparse_island": False,
+        "rule_l_modern": False,
     },
     "balanced": {
         "min_confidence": 0.40,
@@ -40,6 +49,10 @@ PROFILE_PRESETS = {
         "rule_e": False,
         "rule_g_unguarded": False,
         "rule_c_bare": False,
+        "rule_i_empty_page": False,
+        "rule_j_sparse_tail": False,
+        "rule_k_sparse_island": False,
+        "rule_l_modern": False,
     },
     "precision": {
         "min_confidence": 0.50,
@@ -50,8 +63,19 @@ PROFILE_PRESETS = {
         "rule_e": False,
         "rule_g_unguarded": False,
         "rule_c_bare": False,
+        "rule_i_empty_page": False,
+        "rule_j_sparse_tail": False,
+        "rule_k_sparse_island": False,
+        "rule_l_modern": False,
     },
 }
+
+# Confidence assigned to each layout rule (Rules I–L). Page-layout signals are
+# weaker than orthographic ones, so the ambiguous Rule K sits below the
+# balanced/precision thresholds unless a nearby A/G/H candidate agrees.
+LAYOUT_CONF_EMPTY_PAGE = 0.75
+LAYOUT_CONF_SPARSE_TAIL = 0.65
+LAYOUT_CONF_SPARSE_ISLAND = 0.45
 
 
 def _opening_alts_without_yig_mgo():
@@ -76,6 +100,14 @@ class RuleBasedDetector:
         rule_g_unguarded=False,
         rule_c_bare=False,
         rule_e=False,
+        rule_i_empty_page=False,
+        rule_j_sparse_tail=False,
+        rule_k_sparse_island=False,
+        rule_l_modern=False,
+        line_threshold=4,
+        page_delimiter=FORM_FEED,
+        min_blank_lines=2,
+        ignore_page_number_lines=True,
     ):
         if profile is not None:
             if profile not in PROFILE_PRESETS:
@@ -91,6 +123,9 @@ class RuleBasedDetector:
             rule_g_unguarded = opts["rule_g_unguarded"]
             rule_c_bare = opts["rule_c_bare"]
             rule_e = opts["rule_e"]
+            # Layout rules (I–L) are intentionally NOT pulled from the preset:
+            # they stay off in every profile, but an explicit constructor
+            # argument may still enable them alongside a profile.
 
         self.merge_window = merge_window
         self.min_confidence = min_confidence
@@ -101,6 +136,17 @@ class RuleBasedDetector:
         self.rule_g_unguarded = rule_g_unguarded
         self.rule_c_bare = rule_c_bare
         self.rule_e = rule_e
+
+        # Page-layout rules (I–L) — opt-in, see page_layout.py.
+        self.use_rule_i = rule_i_empty_page
+        self.use_rule_j = rule_j_sparse_tail
+        self.use_rule_k = rule_k_sparse_island
+        self.use_rule_l = rule_l_modern
+        self.line_threshold = line_threshold
+        self.page_delimiter = page_delimiter
+        self.min_blank_lines = min_blank_lines
+        self.ignore_page_number_lines = ignore_page_number_lines
+
         self._compile_patterns()
 
     def _compile_patterns(self):
@@ -254,7 +300,75 @@ class RuleBasedDetector:
             ):
                 candidates.append((end, 0.72, "H:sanskrit_closing"))
 
+        # Rules I–L: page-layout signals (opt-in, no-op on continuous text).
+        candidates.extend(self._layout_candidates(text))
+
         return self._merge_candidates(candidates)
+
+    def _layout_candidates(self, text):
+        """Generate boundary candidates from page line-density (Rules I–L).
+
+        Returns an empty list when no layout rule is enabled or the text has no
+        detectable page structure (a single page), so continuous-stream input
+        behaves exactly as it does with only Rules A–H.
+        """
+        if not (
+            self.use_rule_i
+            or self.use_rule_j
+            or self.use_rule_k
+            or self.use_rule_l
+        ):
+            return []
+
+        pages = segment_pages(
+            text,
+            delimiter=self.page_delimiter,
+            min_blank_lines=self.min_blank_lines,
+            ignore_page_number_lines=self.ignore_page_number_lines,
+        )
+        if len(pages) < 2:
+            return []
+
+        cands = []
+        threshold = self.line_threshold
+
+        # Rule I: an empty page marks a break -> boundary at the start of the
+        # following page (or the empty page itself when it is the last one).
+        if self.use_rule_i:
+            for idx, page in enumerate(pages):
+                if page.is_empty:
+                    target = idx + 1 if idx + 1 < len(pages) else idx
+                    pos = char_offset_at_page_start(pages, target)
+                    cands.append((pos, LAYOUT_CONF_EMPTY_PAGE, "I:empty_page"))
+
+        # Rules J / K: sliding 3-page window keyed on a dense page followed by
+        # a sparse one.
+        for n in range(len(pages) - 2):
+            page_a, page_b, page_c = pages[n], pages[n + 1], pages[n + 2]
+            dense_a = page_a.nb_lines > threshold
+            sparse_b = page_b.nb_lines < threshold
+            if not (dense_a and sparse_b):
+                continue
+
+            if page_c.nb_lines < threshold:
+                # Rule J: dense, sparse, sparse -> break before page N+2.
+                if self.use_rule_j:
+                    pos = char_offset_at_page_start(pages, n + 2)
+                    cands.append((pos, LAYOUT_CONF_SPARSE_TAIL, "J:sparse_tail"))
+            else:
+                # Rule K: dense, sparse, dense -> ambiguous. Emit two low
+                # confidence candidates and let the merge favour any nearby
+                # orthographic (A/G/H) hit.
+                if self.use_rule_k:
+                    pos_b = char_offset_at_page_start(pages, n + 1)
+                    pos_c = char_offset_at_page_start(pages, n + 2)
+                    cands.append((pos_b, LAYOUT_CONF_SPARSE_ISLAND, "K:sparse_island"))
+                    cands.append((pos_c, LAYOUT_CONF_SPARSE_ISLAND, "K:sparse_island"))
+
+        # Rule L: modern-publication heuristics are reserved for a later phase
+        # (running headers/footers, title pages). Intentionally a no-op stub.
+
+        return cands
 
     def _merge_candidates(self, candidates):
         if not candidates:
@@ -290,4 +404,8 @@ RULE_LABELS = {
     "G:sbrul_shad": "Rule G — Section opener (༈)",
     "G:sbrul_shad_weak": "Rule G — ༈ opener (weak, recall only)",
     "H:sanskrit_closing": "Rule H — Sanskrit closing blessing",
+    "I:empty_page": "Rule I — Empty page (0 lines)",
+    "J:sparse_tail": "Rule J — Dense page then two sparse pages",
+    "K:sparse_island": "Rule K — Sparse page between dense pages (ambiguous)",
+    "L:modern_publication": "Rule L — Modern publication layout (reserved)",
 }

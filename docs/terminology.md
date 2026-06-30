@@ -39,6 +39,18 @@ Rules anchor openers with **JUNCTION_BEFORE**:
 
 This allows a match after a newline, start of string, or shad/tsheg with optional space—not only after a hard line break (~21% of openers follow `།།` on the same line).
 
+## Page layout terms
+
+Used by the optional page-layout rules (I–L) for OCR input. See [rules.md](rules.md).
+
+| Term | Meaning |
+|------|---------|
+| **Page** | A slice of the source text between two page delimiters. Represented by the `Page` dataclass in [`page_layout.py`](../src/outline_detection/page_layout.py) with its character `start`/`end` offsets. |
+| **Page delimiter** | The marker that separates pages. Default is the form feed `\f`; a blank-line fallback (`blank` / `blankN`) or a custom regex can be used instead. |
+| **`nb_lines`** | The number of **non-empty** lines on a page after optional page-number filtering — the figure Rules J/K compare against `line_threshold` (`T`, default 4). |
+| **Page-number line** | A line containing only digits (Latin or Tibetan ༠–༩), whitespace, and dashes (e.g. `449`, `1-70`, `-`). Skipped from `nb_lines` when `ignore_page_number_lines` is on. |
+| **Empty page** | A page with `nb_lines == 0`; a strong text-break signal (Rule I). |
+
 ## Evaluation metrics
 
 | Metric | Meaning |
